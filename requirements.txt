@@ -1,0 +1,12 @@
+fastapi
+uvicorn
+psycopg2-binary
+passlib==1.7.4
+bcrypt==4.2.0
+python-jose
+python-dotenv
+python-multipart
+python-docx
+PyMuPDF==1.24.10
+httpx
+email-validator
