@@ -320,7 +320,7 @@ def get_quizzes_by_deck(
 
     data = [
         {"id": r[0], "question": r[1], "type": r[2],
-         "options": json.loads(r[3]) if r[3] else None,
+         "options": r[3] if r[3] else None,
          "correct_answer": r[4], "context": r[5]}
         for r in rows
     ]
@@ -359,7 +359,7 @@ def get_practice_quiz(
 
     data = [
         {"id": r[0], "question": r[1], "type": r[2],
-         "options": json.loads(r[3]) if r[3] else None,
+         "options": r[3] if r[3] else None,
          "context": r[4], "was_correct": r[5], "attempts": r[6]}
         for r in rows
     ]
