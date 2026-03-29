@@ -121,10 +121,11 @@ def send_reset_email(email: str, reset_code: str) -> bool:
         msg["Subject"] = "Mã xác thực đặt lại mật khẩu - Flashcard App"
         msg.attach(MIMEText(
             f"""<html><body>
-            <h2>🔐 Đặt lại mật khẩu</h2>
-            <p>Mã xác thực của bạn: <strong style="font-size:24px;color:#007bff;">{reset_code}</strong></p>
-            <p>⏰ Mã hết hạn sau <strong>10 phút</strong>.</p>
-            <p>Nếu bạn không yêu cầu, hãy bỏ qua email này.</p>
+            <p>Xin chào,</p>
+            <p> Chúng tôi đã nhận được yêu cầu đặt lại mật khẩu cho tài khoản của bạn. Vui lòng sử dụng mã xác thực bên dưới để tiếp tục: </p> <span style="font-size: 28px; font-weight: bold; color: #007bff;"> {reset_code} </span>
+            <p> Mã xác thực này sẽ hết hạn sau <strong>10 phút</strong>. </p>
+            <p> Nếu bạn không thực hiện yêu cầu này, vui lòng bỏ qua email. Tài khoản của bạn vẫn được bảo mật. </p>
+            <p>Trân trọng,<br/>Đội ngũ hỗ trợ</p>
             </body></html>""",
             "html",
         ))
