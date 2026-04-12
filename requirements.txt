@@ -1,5 +1,6 @@
 fastapi
 uvicorn
+gunicorn
 psycopg2-binary
 passlib==1.7.4
 bcrypt==4.2.0
