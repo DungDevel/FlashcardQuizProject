@@ -219,12 +219,12 @@ def ensure_quiz_tables():
 async def generate_quiz(
     deck_id:      int        = Form(...),
     file:         UploadFile = File(...),
-    quiz_type:    str        = Form(..., description="multiple | truefalse | fillblank"),
+    quiz_type:    str        = Form(..., description="multiple | truefalse | fillblank | shortanswer"),
     current_user: dict       = Depends(get_current_user),
 ):
     """Đọc file → gọi Groq AI → lưu quiz vào DB."""
-    if quiz_type not in ("multiple", "truefalse", "fillblank"):
-        raise HTTPException(status_code=400, detail="quiz_type phải là: multiple | truefalse | fillblank")
+    if quiz_type not in ("multiple", "truefalse", "fillblank", "shortanswer"):
+        raise HTTPException(status_code=400, detail="quiz_type phải là: multiple | truefalse | fillblank | shortanswer")
 
     text = await extract_text(file)
     if not text or len(text.split()) < 10:
@@ -234,19 +234,54 @@ async def generate_quiz(
 
     instruction_map = {
         "multiple": (
-            "Create as many multiple-choice questions as possible. "
-            "Each item: question, options (4 choices as array), correct_answer, "
-            "context (1-3 sentence hint, do NOT directly reveal the answer)."
+            "Create as many high-quality multiple-choice questions as possible that test deep understanding, "
+            "not just memorization. Follow these strict rules:\n"
+            "  - 'question': clear, specific question. Avoid vague phrasing like 'Which of the following...'\n"
+            "  - 'options': exactly 4 choices (A/B/C/D). All distractors must be plausible, "
+            "    related to the topic, and similar in length to the correct answer. "
+            "    Never use 'All of the above' or 'None of the above'.\n"
+            "  - 'correct_answer': must exactly match one of the 4 options (copy verbatim).\n"
+            "  - 'context': 1-3 sentence conceptual hint. Do NOT restate the question or reveal the answer. "
+            "    Focus on the underlying concept.\n"
+            "  - Vary difficulty: 30% easy (recall), 50% medium (comprehension), 20% hard (application/analysis).\n"
+            "  - Avoid trick questions, double negatives, and ambiguous wording."
         ),
         "truefalse": (
-            "Create as many true/false questions as possible. "
-            "Each item: question, correct_answer (true or false), "
-            "context (1-3 sentence hint, do NOT directly reveal the answer)."
+            "Create as many true/false questions as possible that challenge critical thinking. "
+            "Follow these strict rules:\n"
+            "  - 'question': a single, unambiguous declarative statement. Test one concept per question.\n"
+            "  - 'correct_answer': exactly 'true' or 'false' (lowercase string).\n"
+            "  - 'context': 1-3 sentence hint explaining the relevant concept without revealing "
+            "    whether the statement is true or false.\n"
+            "  - Balance: aim for roughly 50% true and 50% false answers.\n"
+            "  - For false statements: make them believably incorrect (common misconceptions), "
+            "    not obviously wrong.\n"
+            "  - Avoid: absolute words like 'always', 'never', 'all', 'none' unless they are "
+            "    genuinely part of the concept. Avoid trivial or trick statements."
         ),
         "fillblank": (
-            "Create as many fill-in-the-blank questions as possible. "
-            "Each item: question (with ____), correct_answer, "
-            "context (1-3 sentence hint, do NOT directly reveal the answer)."
+            "Create as many fill-in-the-blank questions as possible that target key terms and concepts. "
+            "Follow these strict rules:\n"
+            "  - 'question': a sentence with exactly one blank marked as ____. "
+            "    The blank must replace a key term, name, number, or concept — not filler words.\n"
+            "  - 'correct_answer': the single word or short phrase (2-4 words max) that fills the blank. "
+            "    Must be unambiguous — only one reasonable answer should fit.\n"
+            "  - 'context': 1-3 sentence hint about the surrounding concept. "
+            "    Do NOT include the answer word in the hint.\n"
+            "  - Position variety: place the blank at the beginning, middle, or end of sentences "
+            "    (not always at the end).\n"
+            "  - Avoid: blanks that could accept multiple valid answers, blanks replacing "
+            "    pronouns or conjunctions, and questions where grammar alone reveals the answer."
+        ),
+        "shortanswer": (
+            "Create as many short-answer questions as possible based on key concepts. "
+            "Each item must have: "
+            "  'question': a clear open-ended question, "
+            "  'passage': the exact 2-4 sentence excerpt from the source that contains the answer, "
+            "  'correct_answer': a model answer (1-3 sentences), "
+            "  'key_concepts': array of 3-6 essential keywords/phrases the answer must mention, "
+            "  'context': a 1-2 sentence hint that guides without revealing the answer. "
+            "Output ONLY a valid JSON array. No extra text."
         ),
     }
 
@@ -264,8 +299,8 @@ async def generate_quiz(
         "Content-Type":  "application/json",
     }
     payload = {
-        "model":    GROQ_MODEL,
-        "messages": [{"role": "user", "content": prompt}],
+        "model":       GROQ_MODEL,
+        "messages":    [{"role": "user", "content": prompt}],
         "temperature": 0.7,
     }
 
@@ -289,30 +324,48 @@ async def generate_quiz(
     conn = get_connection()
     try:
         cur = conn.cursor()
+        saved = 0
         for q in quiz_data:
             question = q.get("question") or q.get("statement", "")
-            options  = q.get("options", [])
             answer   = q.get("correct_answer", "")
             context  = q.get("context", "")
+
+            # ── Phân biệt options theo từng loại quiz ──────────────────
+            if quiz_type == "shortanswer":
+                # key_concepts lưu vào options để tái dùng schema, không cần migration
+                key_concepts = q.get("key_concepts", [])
+                options_value = json.dumps(key_concepts) if key_concepts else None
+            else:
+                options = q.get("options", [])
+                options_value = json.dumps(options) if options else None
+
+            # Bỏ qua câu thiếu dữ liệu bắt buộc
+            if not question or not answer:
+                continue
+
             cur.execute(
                 """
                 INSERT INTO quiz (deck_id, question, question_type, options, correct_answer, context)
                 VALUES (%s, %s, %s, %s, %s, %s)
                 """,
-                (deck_id, question, quiz_type, json.dumps(options) if options else None, answer, context),
+                (deck_id, question, quiz_type, options_value, answer, context),
             )
+            saved += 1
+
         conn.commit()
         cur.close()
     finally:
         conn.close()
 
+    if saved == 0:
+        raise HTTPException(status_code=400, detail="AI trả về dữ liệu không hợp lệ, không lưu được câu nào!")
+
     return {
-        "message":   f"Tạo {len(quiz_data)} câu quiz thành công!",
+        "message":   f"Tạo {saved} câu quiz thành công!",
         "deck_id":   deck_id,
         "quiz_type": quiz_type,
-        "count":     len(quiz_data),
+        "count":     saved,
     }
-
 
 @router.get("/quiz/deck/{deck_id}")
 def get_quizzes_by_deck(
@@ -988,6 +1041,207 @@ def delete_quiz(
         cur.close()
 
         return {"message": f"Đã xoá quiz #{quiz_id}!"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        conn.close()
+
+@router.post("/quiz/submit-shortanswer")
+async def submit_short_answer(
+    quiz_id:      int  = Form(...),
+    user_answer:  str  = Form(...),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Nộp đáp án short-answer → AI chấm điểm dựa trên key_concepts.
+    
+    Response:
+      - score         : int (0-100)
+      - is_correct    : bool (score >= 60)
+      - feedback      : str  (nhận xét từ AI)
+      - matched_keys  : list[str]  (từ khóa đã đúng)
+      - missed_keys   : list[str]  (từ khóa còn thiếu)
+      - correct_answer: str  (model answer — chỉ trả về khi score < 60)
+      - srs           : object
+      - task_updated  : bool
+    """
+    user_id = current_user["id"]
+    conn    = get_connection()
+    try:
+        cur = conn.cursor()
+
+        # Lấy thông tin quiz — options chứa key_concepts với shortanswer
+        cur.execute(
+            """
+            SELECT deck_id, question_type, correct_answer, context, question, options
+            FROM quiz WHERE id = %s
+            """,
+            (quiz_id,),
+        )
+        quiz = cur.fetchone()
+        if not quiz:
+            raise HTTPException(status_code=404, detail="Quiz không tồn tại!")
+
+        deck_id, quiz_type, correct_answer, context, question, options_raw = quiz
+        if quiz_type != "shortanswer":
+            raise HTTPException(
+                status_code=400,
+                detail="Endpoint này chỉ dành cho câu hỏi shortanswer!"
+            )
+
+        # Parse key_concepts từ options column
+        key_concepts: list[str] = []
+        if options_raw:
+            parsed = options_raw if isinstance(options_raw, list) else json.loads(options_raw)
+            key_concepts = parsed  # options lưu array key_concepts
+
+        # ── Gọi AI chấm điểm ──────────────────────────────────────────
+        grading_prompt = f"""You are a strict but fair teacher grading a short-answer question.
+
+Question: {question}
+Model Answer: {correct_answer}
+Key Concepts Required: {json.dumps(key_concepts)}
+Student Answer: {user_answer}
+
+Evaluate the student's answer and respond ONLY with a valid JSON object (no extra text):
+{{
+  "score": <integer 0-100>,
+  "matched_keys": [<key concepts the student correctly addressed>],
+  "missed_keys": [<key concepts that were missing or incorrect>],
+  "feedback": "<2-3 sentence constructive feedback in the same language as the question>"
+}}
+
+Scoring guide:
+- 90-100: All key concepts covered accurately
+- 70-89 : Most key concepts present, minor gaps
+- 50-69 : Some key concepts present but significant gaps
+- 0-49  : Few or no key concepts addressed correctly
+"""
+
+        if not GROQ_API_KEY:
+            raise HTTPException(status_code=500, detail="GROQ_API_KEY chưa được cấu hình!")
+
+        headers = {
+            "Authorization": f"Bearer {GROQ_API_KEY}",
+            "Content-Type":  "application/json",
+        }
+        payload = {
+            "model":       GROQ_MODEL,
+            "messages":    [{"role": "user", "content": grading_prompt}],
+            "temperature": 0.2,   # thấp để chấm nhất quán
+        }
+
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(GROQ_API_URL, headers=headers, json=payload)
+
+        if resp.status_code != 200:
+            raise HTTPException(status_code=502, detail=f"Groq API lỗi: {resp.text}")
+
+        ai_raw = resp.json()["choices"][0]["message"]["content"].strip()
+        try:
+            grading = json.loads(ai_raw)
+        except json.JSONDecodeError:
+            match = re.search(r"\{.*\}", ai_raw, re.S)
+            grading = json.loads(match.group(0)) if match else {}
+
+        score        = int(grading.get("score", 0))
+        matched_keys = grading.get("matched_keys", [])
+        missed_keys  = grading.get("missed_keys", [])
+        feedback     = grading.get("feedback", "Không có nhận xét.")
+        is_correct   = score >= 60   # ngưỡng đạt
+
+        # ── Cập nhật SRS ──────────────────────────────────────────────
+        cur.execute(
+            """
+            SELECT id, ease_factor, interval_days, review_count, status, attempt_count
+            FROM user_quiz_progress
+            WHERE user_id = %s AND quiz_id = %s
+            """,
+            (user_id, quiz_id),
+        )
+        existing = cur.fetchone()
+
+        if existing:
+            prog_id, ease, interval, review_count, old_status, attempt_count = existing
+            ease = float(ease or INITIAL_EASE_FACTOR)
+            new_ease, new_interval, next_review = calculate_next_review(
+                is_correct, ease, interval or 0, review_count or 0
+            )
+            new_count  = (review_count or 0) + (1 if is_correct else 0)
+            new_status = "completed" if is_correct else "reviewing"
+
+            cur.execute(
+                """
+                UPDATE user_quiz_progress
+                SET user_answer      = %s,
+                    is_correct       = %s,
+                    ease_factor      = %s,
+                    interval_days    = %s,
+                    next_review_date = %s,
+                    review_count     = %s,
+                    last_review_date = NOW(),
+                    attempt_count    = attempt_count + 1,
+                    status           = %s,
+                    updated_at       = NOW()
+                WHERE id = %s
+                """,
+                (user_answer, is_correct, new_ease, new_interval,
+                 next_review, new_count, new_status, prog_id),
+            )
+            was_completed = old_status == "completed"
+        else:
+            new_ease = INITIAL_EASE_FACTOR
+            if is_correct:
+                new_interval = INTERVAL_FIRST_CORRECT
+                next_review  = datetime.now() + timedelta(days=new_interval)
+                new_count    = 1
+                new_status   = "completed"
+            else:
+                new_interval = INTERVAL_WRONG
+                next_review  = datetime.now()
+                new_count    = 0
+                new_status   = "reviewing"
+
+            cur.execute(
+                """
+                INSERT INTO user_quiz_progress
+                    (user_id, quiz_id, deck_id, quiz_type, user_answer, is_correct,
+                     ease_factor, interval_days, next_review_date, review_count,
+                     last_review_date, attempt_count, status)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), 1, %s)
+                """,
+                (user_id, quiz_id, deck_id, quiz_type, user_answer, is_correct,
+                 new_ease, new_interval, next_review, new_count, new_status),
+            )
+            was_completed = False
+
+        task_updated = False
+        if not was_completed and is_correct:
+            task_updated = update_task_progress_for_quiz(conn, cur, user_id, quiz_type, deck_id)
+
+        conn.commit()
+        cur.close()
+
+        return {
+            "score":          score,
+            "is_correct":     is_correct,
+            "feedback":       feedback,
+            "matched_keys":   matched_keys,
+            "missed_keys":    missed_keys,
+            # Chỉ tiết lộ đáp án mẫu khi chưa đạt
+            "correct_answer": correct_answer if not is_correct else None,
+            "task_updated":   task_updated,
+            "srs": {
+                "ease_factor":   round(new_ease, 2),
+                "interval_days": new_interval,
+                "next_review":   next_review.strftime("%Y-%m-%d %H:%M:%S"),
+                "review_count":  new_count,
+            },
+        }
+
     except HTTPException:
         raise
     except Exception as e:
