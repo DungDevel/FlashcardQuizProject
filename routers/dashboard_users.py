@@ -1,11 +1,5 @@
 """
-routers/dashboard_users.py — Dashboard thống kê + AI dự đoán kết quả học tập
-
-Endpoints:
-  GET  /dashboard/overview         — Tổng quan học tập
-  GET  /dashboard/streaks          — Chuỗi ngày học liên tiếp
-  GET  /dashboard/weekly           — Thống kê tuần này
-  GET  /dashboard/ai-prediction    — AI dự đoán kết quả 1 tuần & 1 tháng tới (Groq)
+routers/dashboard_users.py
 """
 
 import os
@@ -19,21 +13,12 @@ from auth_utils import get_current_user
 
 router = APIRouter(tags=["Dashboard"])
 
-# ===== Groq Config =====
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 GROQ_MODEL   = "llama-3.1-8b-instant"
 
 
-# ─────────────────────────────────────────
-# HELPER — Thu thập toàn bộ dữ liệu học tập của user
-# ─────────────────────────────────────────
-
 def _collect_user_learning_data(user_id: int) -> dict:
-    """
-    Gom toàn bộ số liệu học tập của user từ DB để đưa vào prompt AI.
-    Trả về dict sạch, sẵn sàng serialize thành JSON.
-    """
     conn = get_connection()
     try:
         cur   = conn.cursor()
@@ -46,10 +31,11 @@ def _collect_user_learning_data(user_id: int) -> dict:
         )
         profile = cur.fetchone()
 
-        # ── Flashcard: 30 ngày gần nhất (theo ngày) ──
+        # ── Flashcard: 30 ngày gần nhất ──
         cur.execute(
             """
-            SELECT DATE(last_reviewed) AS d, COUNT(*) AS total,
+            SELECT DATE(last_reviewed) AS d,
+                   COUNT(*) AS total,
                    SUM(CASE WHEN status = 'done' THEN 1 ELSE 0 END) AS done
             FROM user_flashcard_progress
             WHERE user_id = %s AND last_reviewed >= NOW() - INTERVAL '30 days'
@@ -63,23 +49,24 @@ def _collect_user_learning_data(user_id: int) -> dict:
         # ── Flashcard: tổng theo trạng thái ──
         cur.execute(
             """
-            SELECT status, COUNT(*) FROM user_flashcard_progress
+            SELECT status, COUNT(*)
+            FROM user_flashcard_progress
             WHERE user_id = %s GROUP BY status
             """,
             (user_id,),
         )
         fc_status = {r[0]: r[1] for r in cur.fetchall()}
 
-        # ── Flashcard SRS: phân bố interval ──
+        # ── Flashcard SRS (dùng cột mới sau migration) ──
         cur.execute(
             """
             SELECT
-                COUNT(*) FILTER (WHERE interval_days = 0)  AS due_today,
-                COUNT(*) FILTER (WHERE interval_days BETWEEN 1 AND 3)   AS short_term,
-                COUNT(*) FILTER (WHERE interval_days BETWEEN 4 AND 14)  AS mid_term,
-                COUNT(*) FILTER (WHERE interval_days > 14) AS long_term,
-                ROUND(AVG(ease_factor)::numeric, 2)        AS avg_ease,
-                ROUND(AVG(interval_days)::numeric, 1)      AS avg_interval
+                COUNT(*) FILTER (WHERE interval_days = 0)              AS due_today,
+                COUNT(*) FILTER (WHERE interval_days BETWEEN 1 AND 3)  AS short_term,
+                COUNT(*) FILTER (WHERE interval_days BETWEEN 4 AND 14) AS mid_term,
+                COUNT(*) FILTER (WHERE interval_days > 14)             AS long_term,
+                ROUND(AVG(ease_factor)::numeric, 2)                    AS avg_ease,
+                ROUND(AVG(interval_days)::numeric, 1)                  AS avg_interval
             FROM user_flashcard_progress
             WHERE user_id = %s
             """,
@@ -87,26 +74,42 @@ def _collect_user_learning_data(user_id: int) -> dict:
         )
         fc_srs = cur.fetchone()
 
-        # ── Quiz: 30 ngày gần nhất (theo ngày) ──
+        # ── Flashcard: cards due hôm nay ──
         cur.execute(
             """
-            SELECT DATE(updated_at) AS d,
+            SELECT COUNT(*) FROM user_flashcard_progress
+            WHERE user_id = %s AND next_review_date <= NOW()
+            """,
+            (user_id,),
+        )
+        fc_due_now = cur.fetchone()[0]
+
+        # ── Quiz: 30 ngày gần nhất
+        # Dùng last_review_date (tên cột thực tế trong DB của bạn)
+        cur.execute(
+            """
+            SELECT DATE(last_review_date) AS d,
                    COUNT(*) AS total,
                    SUM(CASE WHEN is_correct THEN 1 ELSE 0 END) AS correct
             FROM user_quiz_progress
-            WHERE user_id = %s AND updated_at >= NOW() - INTERVAL '30 days'
-            GROUP BY DATE(updated_at)
+            WHERE user_id = %s
+              AND last_review_date >= NOW() - INTERVAL '30 days'
+            GROUP BY DATE(last_review_date)
             ORDER BY d ASC
             """,
             (user_id,),
         )
         quiz_daily = [
-            {"date": str(r[0]), "total": r[1], "correct": r[2],
-             "accuracy": round(r[2] / r[1] * 100, 1) if r[1] else 0}
+            {
+                "date":     str(r[0]),
+                "total":    r[1],
+                "correct":  r[2],
+                "accuracy": round(r[2] / r[1] * 100, 1) if r[1] else 0,
+            }
             for r in cur.fetchall()
         ]
 
-        # ── Quiz: accuracy theo từng loại ──
+        # ── Quiz: accuracy theo quiz_type ──
         cur.execute(
             """
             SELECT quiz_type,
@@ -119,18 +122,26 @@ def _collect_user_learning_data(user_id: int) -> dict:
             (user_id,),
         )
         quiz_by_type = [
-            {"type": r[0], "total": r[1], "correct": r[2],
-             "accuracy": round(r[2] / r[1] * 100, 1) if r[1] else 0}
+            {
+                "type":     r[0],
+                "total":    r[1],
+                "correct":  r[2],
+                "accuracy": round(r[2] / r[1] * 100, 1) if r[1] else 0,
+            }
             for r in cur.fetchall()
         ]
 
-        # ── Quiz SRS: ease & interval trung bình ──
+        # ── Quiz SRS (ease_factor, interval_days, next_review_date có sẵn trong DB) ──
         cur.execute(
             """
             SELECT
-                ROUND(AVG(ease_factor)::numeric, 2)   AS avg_ease,
-                ROUND(AVG(interval_days)::numeric, 1) AS avg_interval,
-                COUNT(*) FILTER (WHERE next_review_date <= NOW()) AS due_now
+                ROUND(AVG(ease_factor)::numeric, 2)    AS avg_ease,
+                ROUND(AVG(interval_days)::numeric, 1)  AS avg_interval,
+                COUNT(*) FILTER (WHERE next_review_date <= NOW()) AS due_now,
+                COUNT(*) FILTER (WHERE interval_days = 0)              AS short_0,
+                COUNT(*) FILTER (WHERE interval_days BETWEEN 1 AND 3)  AS short_term,
+                COUNT(*) FILTER (WHERE interval_days BETWEEN 4 AND 14) AS mid_term,
+                COUNT(*) FILTER (WHERE interval_days > 14)             AS long_term
             FROM user_quiz_progress
             WHERE user_id = %s
             """,
@@ -138,7 +149,7 @@ def _collect_user_learning_data(user_id: int) -> dict:
         )
         quiz_srs = cur.fetchone()
 
-        # ── Planner: task completion 4 tuần gần nhất ──
+        # ── Planner: task completion 4 tuần ──
         cur.execute(
             """
             SELECT pd.study_date,
@@ -146,7 +157,7 @@ def _collect_user_learning_data(user_id: int) -> dict:
                    SUM(CASE WHEN t.status = 'completed' THEN 1 ELSE 0 END) AS done
             FROM task t
             JOIN planner_day pd ON t.planner_day_id = pd.id
-            JOIN planner p ON pd.planner_id = p.id
+            JOIN planner p      ON pd.planner_id = p.id
             WHERE p.user_id = %s
               AND pd.study_date >= NOW() - INTERVAL '28 days'
             GROUP BY pd.study_date
@@ -155,8 +166,12 @@ def _collect_user_learning_data(user_id: int) -> dict:
             (user_id,),
         )
         task_daily = [
-            {"date": str(r[0]), "total": r[1], "done": r[2],
-             "rate": round(r[2] / r[1] * 100, 1) if r[1] else 0}
+            {
+                "date":  str(r[0]),
+                "total": r[1],
+                "done":  r[2],
+                "rate":  round(r[2] / r[1] * 100, 1) if r[1] else 0,
+            }
             for r in cur.fetchall()
         ]
 
@@ -182,7 +197,7 @@ def _collect_user_learning_data(user_id: int) -> dict:
                 else:
                     break
 
-        # ── Số deck đang hoạt động ──
+        # ── Active decks ──
         cur.execute(
             "SELECT COUNT(DISTINCT deck_id) FROM user_flashcard_progress WHERE user_id = %s",
             (user_id,),
@@ -205,22 +220,26 @@ def _collect_user_learning_data(user_id: int) -> dict:
         "active_decks": active_decks,
         "flashcard": {
             "status_breakdown": fc_status,
+            "due_now": fc_due_now,
             "srs": {
-                "due_today":   int(fc_srs[0] or 0),
-                "short_term":  int(fc_srs[1] or 0),
-                "mid_term":    int(fc_srs[2] or 0),
-                "long_term":   int(fc_srs[3] or 0),
-                "avg_ease":    float(fc_srs[4] or 2.5),
+                "due_today":         int(fc_srs[0] or 0),
+                "short_term":        int(fc_srs[1] or 0),
+                "mid_term":          int(fc_srs[2] or 0),
+                "long_term":         int(fc_srs[3] or 0),
+                "avg_ease":          float(fc_srs[4] or 2.5),
                 "avg_interval_days": float(fc_srs[5] or 0),
             },
             "daily_30d": fc_daily,
         },
         "quiz": {
-            "by_type":  quiz_by_type,
+            "by_type": quiz_by_type,
             "srs": {
                 "avg_ease":          float(quiz_srs[0] or 2.5),
                 "avg_interval_days": float(quiz_srs[1] or 0),
                 "due_now":           int(quiz_srs[2] or 0),
+                "short_term":        int(quiz_srs[4] or 0),
+                "mid_term":          int(quiz_srs[5] or 0),
+                "long_term":         int(quiz_srs[6] or 0),
             },
             "daily_30d": quiz_daily,
         },
@@ -231,13 +250,8 @@ def _collect_user_learning_data(user_id: int) -> dict:
     }
 
 
-# ─────────────────────────────────────────
-# ENDPOINTS
-# ─────────────────────────────────────────
-
 @router.get("/dashboard/overview")
 def get_dashboard_overview(current_user: dict = Depends(get_current_user)):
-    """Tổng quan học tập: tổng flashcard, quiz, progress."""
     user_id = current_user["id"]
     conn    = get_connection()
     try:
@@ -256,18 +270,39 @@ def get_dashboard_overview(current_user: dict = Depends(get_current_user)):
         active_decks = cur.fetchone()[0]
 
         cur.execute(
-            "SELECT COUNT(*), SUM(CASE WHEN is_correct THEN 1 ELSE 0 END) FROM user_quiz_progress WHERE user_id = %s",
+            """
+            SELECT COUNT(*),
+                   SUM(CASE WHEN is_correct THEN 1 ELSE 0 END)
+            FROM user_quiz_progress WHERE user_id = %s
+            """,
             (user_id,),
         )
         quiz_row        = cur.fetchone()
         total_quizzes   = quiz_row[0] or 0
         correct_quizzes = quiz_row[1] or 0
 
+        cur.execute(
+            """
+            SELECT COUNT(*) FROM user_flashcard_progress
+            WHERE user_id = %s AND next_review_date <= NOW()
+            """,
+            (user_id,),
+        )
+        fc_due_today = cur.fetchone()[0]
+
+        cur.execute(
+            """
+            SELECT COUNT(*) FROM user_quiz_progress
+            WHERE user_id = %s AND next_review_date <= NOW()
+            """,
+            (user_id,),
+        )
+        quiz_due_today = cur.fetchone()[0]
+
         today = datetime.now().date()
         cur.execute(
             """
-            SELECT COUNT(*) FILTER (WHERE t.status = 'completed'),
-                   COUNT(*)
+            SELECT COUNT(*) FILTER (WHERE t.status = 'completed'), COUNT(*)
             FROM task t
             JOIN planner_day pd ON t.planner_day_id = pd.id
             JOIN planner p      ON pd.planner_id = p.id
@@ -279,18 +314,23 @@ def get_dashboard_overview(current_user: dict = Depends(get_current_user)):
         tasks_done_today  = task_row[0] or 0
         tasks_total_today = task_row[1] or 0
 
-        cur.execute("SELECT study_level, study_days FROM user_profile WHERE user_id = %s", (user_id,))
+        cur.execute(
+            "SELECT study_level, study_days FROM user_profile WHERE user_id = %s",
+            (user_id,),
+        )
         profile = cur.fetchone()
         cur.close()
 
         return {
-            "user_id":             user_id,
-            "study_level":         profile[0] if profile else None,
-            "study_days":          profile[1] if profile else None,
-            "active_decks":        active_decks,
-            "flashcards_mastered": total_flashcards_done,
-            "quizzes_completed":   total_quizzes,
-            "quiz_accuracy":       round(correct_quizzes / total_quizzes * 100, 1) if total_quizzes else 0,
+            "user_id":              user_id,
+            "study_level":          profile[0] if profile else None,
+            "study_days":           profile[1] if profile else None,
+            "active_decks":         active_decks,
+            "flashcards_mastered":  total_flashcards_done,
+            "flashcards_due_today": fc_due_today,
+            "quizzes_completed":    total_quizzes,
+            "quizzes_due_today":    quiz_due_today,
+            "quiz_accuracy":        round(correct_quizzes / total_quizzes * 100, 1) if total_quizzes else 0,
             "today": {
                 "tasks_done":  tasks_done_today,
                 "tasks_total": tasks_total_today,
@@ -305,7 +345,6 @@ def get_dashboard_overview(current_user: dict = Depends(get_current_user)):
 
 @router.get("/dashboard/weekly")
 def get_weekly_stats(current_user: dict = Depends(get_current_user)):
-    """Thống kê 7 ngày gần nhất."""
     user_id = current_user["id"]
     today   = datetime.now().date()
     monday  = today - timedelta(days=today.weekday())
@@ -326,13 +365,14 @@ def get_weekly_stats(current_user: dict = Depends(get_current_user)):
         )
         fc_rows = {str(r[0]): r[1] for r in cur.fetchall()}
 
+        # Dùng last_review_date (tên thực tế trong user_quiz_progress)
         cur.execute(
             """
-            SELECT DATE(updated_at), COUNT(*)
+            SELECT DATE(last_review_date), COUNT(*)
             FROM user_quiz_progress
-            WHERE user_id = %s AND status = 'completed' AND updated_at >= %s
-            GROUP BY DATE(updated_at)
-            ORDER BY DATE(updated_at) ASC
+            WHERE user_id = %s AND last_review_date >= %s
+            GROUP BY DATE(last_review_date)
+            ORDER BY DATE(last_review_date) ASC
             """,
             (user_id, monday),
         )
@@ -355,7 +395,6 @@ def get_weekly_stats(current_user: dict = Depends(get_current_user)):
 
 @router.get("/dashboard/streaks")
 def get_study_streaks(current_user: dict = Depends(get_current_user)):
-    """Chuỗi ngày học liên tiếp (streak)."""
     user_id = current_user["id"]
     conn    = get_connection()
     try:
@@ -405,53 +444,18 @@ def get_study_streaks(current_user: dict = Depends(get_current_user)):
     }
 
 
-# ─────────────────────────────────────────
-# AI PREDICTION — Groq
-# ─────────────────────────────────────────
-
 @router.get("/dashboard/ai-prediction")
 async def get_ai_prediction(current_user: dict = Depends(get_current_user)):
-    """
-    Dùng Groq AI để phân tích dữ liệu học tập thực tế của user và
-    dự đoán kết quả học tập trong 1 tuần & 1 tháng tới.
-
-    Response JSON:
-    {
-      "generated_at": "...",
-      "data_snapshot": { ...raw learning data... },
-      "prediction": {
-        "summary": "...",
-        "weekly": {
-          "flashcards_expected":  int,
-          "quiz_accuracy_expected": float,
-          "tasks_completion_expected": float,
-          "highlights": [...],
-          "risks": [...]
-        },
-        "monthly": {
-          "flashcards_expected":  int,
-          "quiz_accuracy_expected": float,
-          "mastery_rate_expected": float,
-          "highlights": [...],
-          "risks": [...]
-        },
-        "recommendations": [...],
-        "confidence": "low|medium|high"
-      }
-    }
-    """
     if not GROQ_API_KEY:
         raise HTTPException(status_code=500, detail="GROQ_API_KEY chưa được cấu hình!")
 
     user_id = current_user["id"]
 
-    # 1. Thu thập dữ liệu
     try:
         learning_data = _collect_user_learning_data(user_id)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Lỗi thu thập dữ liệu: {e}")
 
-    # 2. Kiểm tra đủ dữ liệu để dự đoán
     has_flashcard_data = bool(learning_data["flashcard"]["daily_30d"])
     has_quiz_data      = bool(learning_data["quiz"]["daily_30d"])
     if not has_flashcard_data and not has_quiz_data:
@@ -462,7 +466,6 @@ async def get_ai_prediction(current_user: dict = Depends(get_current_user)):
             "message":       "Chưa có đủ dữ liệu học tập để dự đoán. Hãy học thêm vài ngày nhé!",
         }
 
-    # 3. Xây dựng prompt
     prompt = f"""
 You are an expert educational data analyst. Analyze this learner's real study data and predict their learning outcomes for the next 7 days and 30 days.
 
@@ -472,20 +475,20 @@ Today: {learning_data["today"]}
 {json.dumps(learning_data, ensure_ascii=False, indent=2)}
 
 === INSTRUCTIONS ===
-Based on the data above, produce a JSON prediction. Use ONLY the data provided — do NOT invent numbers.
+Based on the data above, produce a JSON prediction. Use ONLY the data provided.
 
 Rules:
-- "flashcards_expected": estimated number of flashcards the user will review/complete in the period, based on their daily_30d trend
-- "quiz_accuracy_expected": estimated accuracy % based on recent quiz performance trend
+- "flashcards_expected": estimated flashcards reviewed in the period, based on daily_30d trend
+- "quiz_accuracy_expected": estimated accuracy % based on recent quiz trend
 - "tasks_completion_expected": estimated task completion rate % based on planner history
-- "mastery_rate_expected" (monthly only): % of cards likely to reach long-term interval (>14 days)
-- "highlights": 2-3 positive trends observed (be specific, cite actual numbers)
+- "mastery_rate_expected" (monthly only): % of cards likely to reach long_term SRS interval (>14 days)
+- "highlights": 2-3 positive trends (cite actual numbers)
 - "risks": 2-3 risks or weak spots (be specific)
-- "recommendations": 3-5 concrete, actionable study tips tailored to this learner
-- "confidence": "low" if <7 active days of data, "medium" if 7-20 days, "high" if >20 days
-- "summary": 2-3 sentence overall assessment in Vietnamese
+- "recommendations": 3-5 actionable tips tailored to this learner's SRS data
+- "confidence": "low" if <7 active days, "medium" if 7-20 days, "high" if >20 days
+- "summary": 2-3 sentence assessment in Vietnamese
 
-Output ONLY valid JSON, no extra text, no markdown. Use this exact schema:
+Output ONLY valid JSON, no extra text, no markdown:
 {{
   "summary": "...",
   "weekly": {{
@@ -507,7 +510,6 @@ Output ONLY valid JSON, no extra text, no markdown. Use this exact schema:
 }}
 """
 
-    # 4. Gọi Groq
     headers = {
         "Authorization": f"Bearer {GROQ_API_KEY}",
         "Content-Type":  "application/json",
@@ -515,7 +517,7 @@ Output ONLY valid JSON, no extra text, no markdown. Use this exact schema:
     payload = {
         "model":       GROQ_MODEL,
         "messages":    [{"role": "user", "content": prompt}],
-        "temperature": 0.3,   # thấp để output ổn định, ít hallucinate
+        "temperature": 0.3,
         "max_tokens":  1200,
     }
 
@@ -527,13 +529,11 @@ Output ONLY valid JSON, no extra text, no markdown. Use this exact schema:
 
     ai_text = resp.json()["choices"][0]["message"]["content"].strip()
 
-    # 5. Parse JSON từ AI
-    prediction = None
+    prediction  = None
     parse_error = None
     try:
         prediction = json.loads(ai_text)
     except json.JSONDecodeError:
-        # Fallback: tìm JSON block trong text
         import re
         match = re.search(r"\{.*\}", ai_text, re.S)
         if match:
