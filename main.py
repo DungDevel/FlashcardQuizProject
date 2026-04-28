@@ -9,6 +9,11 @@ import re
 import random
 import string
 import smtplib
+import uuid
+from authlib.integrations.starlette_client import OAuth
+from starlette.middleware.sessions import SessionMiddleware
+from fastapi import Request
+from fastapi.responses import RedirectResponse
 from typing import Optional
 from datetime import datetime, timedelta
 from email.mime.text import MIMEText
@@ -47,13 +52,27 @@ app = FastAPI(
         "Tính năng: Auth JWT, Deck, Flashcard (AI), Quiz (AI + SRS), Planner, Social, Dashboard, Admin."
     ),
 )
+oauth = OAuth()
 
+oauth.register(
+    name='google',
+    client_id=os.getenv("CLIENT_ID"),
+    client_secret=os.getenv("CLIENT_SECRET"),
+    server_metadata_url='https://accounts.google.com/.well-known/openid-configuration',
+    client_kwargs={
+        'scope': 'openid email profile'
+    }
+)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173", "https://capstone1-ce77-api.onrender.com"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+)
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=os.environ.get("SECRET_KEY", "mysecretkey")
 )
 
 # Gắn routers
@@ -129,7 +148,7 @@ def send_reset_email(email: str, reset_code: str) -> bool:
             </body></html>""",
             "html",
         ))
-        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
+        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=10) as server:
             server.starttls()
             server.login(EMAIL_USER, EMAIL_PASSWORD)
             server.send_message(msg)
@@ -436,3 +455,58 @@ def reset_password(request: ResetPasswordRequest):
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         conn.close()
+# ─────────────────────────────────────────
+# GOOGLE AUTH
+# ─────────────────────────────────────────
+@app.get("/auth/google/login")
+async def login(request: Request):
+    # Đường dẫn Google sẽ trả data về
+    redirect_uri = request.url_for('auth_callback')
+    return await oauth.google.authorize_redirect(request, redirect_uri)
+
+@app.get("/auth/google/callback")
+async def auth_callback(request: Request):
+    try:
+        token = await oauth.google.authorize_access_token(request)
+        user = token.get('userinfo')
+        email = user['email']
+        name = user.get('name', 'Google User')
+        
+        conn = get_connection()
+        cur = conn.cursor()
+        
+        # 1. Kiểm tra xem user này đã tồn tại trong database chưa
+        cur.execute("SELECT id, username FROM users WHERE email = %s", (email,))
+        db_user = cur.fetchone()
+        
+        if db_user:
+            user_id = db_user[0]
+            username = db_user[1]
+        else:
+            # 2. Nếu chưa có, tạo user mới
+            username = f"{name.replace(' ', '').lower()}_{str(uuid.uuid4())[:6]}"
+            # Sinh ra một mật khẩu rác cho tài khoản dạng này
+            random_pwd = hash_password(str(uuid.uuid4()))
+            
+            cur.execute(
+                "INSERT INTO users (email, username, password_hash) VALUES (%s, %s, %s) RETURNING id",
+                (email, username, random_pwd)
+            )
+            user_id = cur.fetchone()[0]
+            conn.commit()
+            
+        cur.close()
+        conn.close()
+
+        # 3. Tạo JWT Access Token để frontend sử dụng
+        access_token = create_access_token(data={"sub": str(user_id), "username": username})
+
+        # 4. Redirect thẳng về Frontend (Ví dụ URL của React/Vue) kèm token.
+        #    Frontend sẽ cần lấy token này trên URL, lưu vào LocalStorage rồi xoá URL đi
+        frontend_redirect_url = f"http://localhost:5173/auth/callback?token={access_token}"
+        return RedirectResponse(url=frontend_redirect_url)
+
+    except Exception as e:
+        print(f"Lỗi đăng nhập Google: {e}")
+        # Nếu lỗi thì trả về trang đăng nhập với param báo lỗi
+        return RedirectResponse(url="http://localhost:5173/login?error=GoogleAuthFailed")
