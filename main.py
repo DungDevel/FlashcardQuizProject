@@ -8,7 +8,6 @@ import os
 import re
 import random
 import string
-import smtplib
 import uuid
 from authlib.integrations.starlette_client import OAuth
 from starlette.middleware.sessions import SessionMiddleware
@@ -16,8 +15,8 @@ from fastapi import Request
 from fastapi.responses import RedirectResponse
 from typing import Optional
 from datetime import datetime, timedelta
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
+
+import httpx
 
 from fastapi import FastAPI, HTTPException, Depends, Form
 from fastapi.middleware.cors import CORSMiddleware
@@ -108,10 +107,8 @@ SECRET_KEY                  = os.environ.get("SECRET_KEY", "mysecretkey")
 ALGORITHM                   = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24  # 1 ngày
 
-SMTP_SERVER    = "smtp.gmail.com"
-SMTP_PORT      = 587
-EMAIL_USER     = os.environ.get("EMAIL_USER", "")
-EMAIL_PASSWORD = os.environ.get("EMAIL_PASSWORD", "")
+RESEND_API_KEY    = os.environ.get("RESEND_API_KEY", "")
+RESEND_FROM_EMAIL = os.environ.get("RESEND_FROM_EMAIL", os.environ.get("EMAIL_USER", ""))
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
@@ -135,25 +132,43 @@ def create_access_token(data: dict, expires_delta: timedelta = None) -> str:
 
 def send_reset_email(email: str, reset_code: str) -> bool:
     try:
-        msg            = MIMEMultipart()
-        msg["From"]    = EMAIL_USER
-        msg["To"]      = email
-        msg["Subject"] = "Mã xác thực đặt lại mật khẩu - Flashcard App"
-        msg.attach(MIMEText(
-            f"""<html><body>
+        if not RESEND_API_KEY:
+            print("⚠️ Thiếu RESEND_API_KEY (env).")
+            return False
+        if not RESEND_FROM_EMAIL:
+            print("⚠️ Thiếu RESEND_FROM_EMAIL (env).")
+            return False
+
+        subject = "Mã xác thực đặt lại mật khẩu - Flashcard App"
+        html_content = f"""<html><body>
             <p>Xin chào,</p>
-            <p> Chúng tôi đã nhận được yêu cầu đặt lại mật khẩu cho tài khoản của bạn. Vui lòng sử dụng mã xác thực bên dưới để tiếp tục: </p> <span style="font-size: 28px; font-weight: bold; color: #007bff;"> {reset_code} </span>
-            <p> Mã xác thực này sẽ hết hạn sau <strong>10 phút</strong>. </p>
-            <p> Nếu bạn không thực hiện yêu cầu này, vui lòng bỏ qua email. Tài khoản của bạn vẫn được bảo mật. </p>
+            <p>Chúng tôi đã nhận được yêu cầu đặt lại mật khẩu cho tài khoản của bạn. Vui lòng sử dụng mã xác thực bên dưới để tiếp tục:</p>
+            <div style=\"font-size: 28px; font-weight: bold; color: #007bff; margin: 12px 0;\">{reset_code}</div>
+            <p>Mã xác thực này sẽ hết hạn sau <strong>10 phút</strong>.</p>
+            <p>Nếu bạn không thực hiện yêu cầu này, vui lòng bỏ qua email. Tài khoản của bạn vẫn được bảo mật.</p>
             <p>Trân trọng,<br/>Đội ngũ hỗ trợ</p>
-            </body></html>""",
-            "html",
-        ))
-        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=10) as server:
-            server.starttls()
-            server.login(EMAIL_USER, EMAIL_PASSWORD)
-            server.send_message(msg)
-        return True
+        </body></html>"""
+
+        payload = {
+            "from": RESEND_FROM_EMAIL,
+            "to": [email],
+            "subject": subject,
+            "html": html_content,
+        }
+
+        headers = {
+            "Authorization": f"Bearer {RESEND_API_KEY}",
+            "Content-Type": "application/json",
+        }
+
+        with httpx.Client(timeout=10) as client:
+            resp = client.post("https://api.resend.com/emails", json=payload, headers=headers)
+
+        if 200 <= resp.status_code < 300:
+            return True
+
+        print(f"⚠️ Resend trả về status={resp.status_code}, body={resp.text}")
+        return False
     except Exception as e:
         print(f"⚠️ Lỗi gửi email: {e}")
         return False
@@ -413,7 +428,7 @@ def forgot_password(request: ForgotPasswordRequest):
         conn.close()
 
     if not send_reset_email(email, reset_code):
-        raise HTTPException(status_code=500, detail="Không thể gửi email! Kiểm tra cấu hình SMTP.")
+        raise HTTPException(status_code=500, detail="Không thể gửi email! Kiểm tra cấu hình Resend.")
 
     return {"message": f"Mã xác thực đã gửi đến {email}. Mã hết hạn sau 10 phút."}
 
