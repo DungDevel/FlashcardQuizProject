@@ -36,6 +36,7 @@ from routers.planner          import router as planner_router
 from routers.social           import router as social_router
 from routers.dashboard_users  import router as dashboard_router
 from routers.admin            import router as admin_router
+from routers.notifications import router as notifications_router
 
 # ─── Shared utils ───
 from database    import get_connection, init_tables
@@ -83,7 +84,7 @@ app.include_router(planner_router)
 app.include_router(social_router)
 app.include_router(dashboard_router)
 app.include_router(admin_router)
-
+app.include_router(notifications_router)
 
 # ─────────────────────────────────────────
 # STARTUP

@@ -11,3 +11,4 @@ python-docx
 PyMuPDF==1.24.10
 httpx
 email-validator
+pywebpush

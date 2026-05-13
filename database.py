@@ -204,6 +204,19 @@ def init_tables():
     );
 
     -- =====================
+    -- PUSH NOTIFICATION SUBSCRIPTIONS
+    -- =====================
+    CREATE TABLE IF NOT EXISTS push_subscriptions (
+        id          SERIAL PRIMARY KEY,
+        user_id     INTEGER REFERENCES users(id) ON DELETE CASCADE,
+        endpoint    TEXT NOT NULL,
+        p256dh      TEXT NOT NULL,
+        auth        TEXT NOT NULL,
+        created_at  TIMESTAMP DEFAULT NOW(),
+        UNIQUE(user_id, endpoint)
+    );
+
+    -- =====================
     -- INDEXES (tăng tốc truy vấn)
     -- =====================
     CREATE INDEX IF NOT EXISTS idx_flashcards_deck_id         ON flashcards(deck_id);
