@@ -194,49 +194,73 @@ async def generate_flashcards(
 
     # 5. Build prompt
     existing = ", ".join(get_existing_fronts(deck_id)[:100])
-    prompt = (
-        "You are an expert English vocabulary flashcard generator.\n\n"
+    prompt = f"""
+        You are an expert English vocabulary flashcard generator.
 
-        f"Deck topic: {deck_name}\n"
-        f"Existing words (DO NOT repeat): {existing}\n\n"
+        Deck topic: {deck_name}
 
-        "Task:\n"
-        "From the document below, extract English vocabulary related to the topic.\n\n"
+        Existing words (DO NOT include these words again):
+        {existing}
 
-        "Rules:\n"
-        "- Only extract words that appear in the document\n"
-        "- Skip common/basic words\n"
-        "- Prefer technical or academic vocabulary\n"
-        "- NO DUPLICATES under any circumstances\n"
-        "- Treat words as duplicates if they differ only by:\n"
-        "  + plural/singular forms (e.g., system/systems)\n"
-        "  + verb tense (e.g., analyze/analyzed/analyzing)\n"
-        "  + capitalization (e.g., Data/data)\n"
-        "- If a word already exists in 'Existing words', DO NOT include it\n"
-        "- Each word must appear ONLY ONCE in the final output\n"
-        "- Before returning, double-check and remove all duplicates\n\n"
+        TASK:
+        Extract English vocabulary from the document that is strongly related to the deck topic.
 
-        "Each flashcard must contain:\n"
-        "- front: English word\n"
-        "- back: Vietnamese meaning\n"
-        "- verb: IPA pronunciation\n"
-        "- example: natural English sentence\n\n"
+        IMPORTANT RULES:
+        - ONLY use words that appear in the document
+        - DO NOT invent new words
+        - Prefer academic, technical, formal, or topic-related vocabulary
+        - Skip very common/basic English words
+        - NO DUPLICATES under any circumstances
 
-        "STRICT JSON RULES:\n"
-        "- Return ONLY a JSON array\n"
-        "- Do NOT include explanations\n"
-        "- Do NOT include markdown\n"
-        "- Use ONLY double quotes \" \"\n"
-        "- Use ':' between keys and values\n"
-        "- Do NOT use '='\n\n"
+        Treat these as duplicates:
+        - singular/plural forms
+        example: system/systems
+        - verb tense variations
+        example: analyze/analyzed/analyzing
+        - capitalization differences
+        example: Data/data
 
-        "Correct format example:\n"
-        "["
-        "{\"front\":\"Agile\",\"back\":\"Phương pháp linh hoạt\",\"verb\":\"/ˈædʒaɪl/\",\"example\":\"Agile development improves flexibility.\"}"
-        "]\n\n"
+        If a word already exists in Existing words:
+        - DO NOT include it
 
-        f"Document:\n{text[:8000]}"
-    )
+        Each word must appear ONLY ONCE.
+
+        Before generating the final answer:
+        1. Normalize all words
+        2. Remove duplicate meanings/forms
+        3. Double-check uniqueness carefully
+
+        FLASHCARD FORMAT:
+        Each flashcard object must contain:
+        - "front": English vocabulary word
+        - "back": Vietnamese meaning
+        - "ipa": IPA pronunciation
+        - "example": Natural English example sentence
+
+        STRICT OUTPUT RULES:
+        - Return ONLY valid JSON
+        - Return ONLY a JSON array
+        - Do NOT include markdown
+        - Do NOT include explanations
+        - Do NOT include comments
+        - Use ONLY double quotes
+        - Use ":" between keys and values
+        - Never use "="
+        - Output must be parseable with json.loads()
+
+        VALID EXAMPLE:
+        [
+        {
+            "front": "Agile",
+            "back": "Phương pháp linh hoạt",
+            "ipa": "/ˈædʒaɪl/",
+            "example": "Agile development improves team flexibility."
+        }
+        ]
+
+        DOCUMENT:
+        {text[:8000]}
+        """
 
     # 6. Gọi Groq API
     if not GROQ_API_KEY:
