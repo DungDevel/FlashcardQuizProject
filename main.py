@@ -99,6 +99,9 @@ def on_startup():
         print(f"⚠️ Lỗi khởi động: {e}")
         print("Service vẫn chạy, database sẽ kết nối khi cần.")
 
+@app.get("/health", tags=["System"])
+def health_check():
+    return {"status": "ok"}
 
 # ─────────────────────────────────────────
 # CONFIG
