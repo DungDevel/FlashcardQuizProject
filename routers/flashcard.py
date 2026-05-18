@@ -42,18 +42,27 @@ BANNED_WORDS = [
 def extract_text(file_bytes: bytes, filename: str) -> str:
     """Trích xuất text từ .docx / .pdf / .txt."""
     name = filename.lower()
+
     if name.endswith(".docx"):
         doc = Document(BytesIO(file_bytes))
         return "\n".join(p.text for p in doc.paragraphs).strip()
-    if name.endswith(".pdf"):
-        pdf = fitz.open(stream=file_bytes, filetype="pdf")
+
+    if name.endswith(".pdf"):                                        # ← THAY đoạn này
+        pdf  = fitz.open(stream=file_bytes, filetype="pdf")
         text = "\n".join(page.get_text("text") for page in pdf)
         pdf.close()
+        if len(text.strip().split()) < 20:
+            raise HTTPException(
+                status_code=400,
+                detail="File PDF này chứa ảnh, không thể đọc text. "
+                       "Vui lòng dùng PDF có text hoặc chuyển sang file .docx/.txt!"
+            )
         return text.strip()
+
     if name.endswith(".txt"):
         return file_bytes.decode("utf-8-sig", errors="ignore").strip()
-    raise HTTPException(status_code=400, detail="Chỉ hỗ trợ file .docx, .pdf, .txt!")
 
+    raise HTTPException(status_code=400, detail="Chỉ hỗ trợ file .docx, .pdf, .txt!")
 
 def compute_hash(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
