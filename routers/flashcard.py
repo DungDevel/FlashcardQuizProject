@@ -19,8 +19,6 @@ import httpx
 import fitz  # PyMuPDF
 from docx import Document
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Depends
-from sqlalchemy import text
-
 from database import get_connection
 from auth_utils import get_current_user
 
