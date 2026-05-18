@@ -19,6 +19,7 @@ import httpx
 import fitz  # PyMuPDF
 from docx import Document
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Depends
+from sqlalchemy import text
 
 from database import get_connection
 from auth_utils import get_current_user
@@ -250,12 +251,12 @@ async def generate_flashcards(
 
         VALID EXAMPLE:
         [
-        {
+        {{
             "front": "Agile",
             "back": "Phương pháp linh hoạt",
             "ipa": "/ˈædʒaɪl/",
             "example": "Agile development improves team flexibility."
-        }
+        }}
         ]
 
         DOCUMENT:
@@ -313,7 +314,13 @@ async def generate_flashcards(
         for card in flashcards:
             cur.execute(
                 "INSERT INTO flashcards (deck_id, front, back, verb, example) VALUES (%s, %s, %s, %s, %s)",
-                (deck_id, card.get("front", ""), card.get("back", ""), card.get("verb", ""), card.get("example", "")),
+                (
+                    deck_id,
+                    card.get("front", ""),
+                    card.get("back", ""),
+                    card.get("ipa", card.get("verb", "")),  # ← fix key ipa
+                    card.get("example", ""),
+                ),
             )
         conn.commit()
         cur.close()
