@@ -23,14 +23,36 @@ async def generate_and_store_prediction(
         return
 
     prompt = f"""
-You are an advanced AI learning coach.
+Bạn là một AI Learning Coach chuyên phân tích hành vi học tập.
 
-Analyze this learner's study behavior.
+Hãy phân tích dữ liệu học tập của người dùng và đưa ra nhận xét hoàn toàn bằng TIẾNG VIỆT.
 
-Return ONLY valid JSON.
+Yêu cầu:
+- Tất cả nội dung phải bằng tiếng Việt
+- highlights phải bằng tiếng Việt
+- risks phải bằng tiếng Việt
+- recommendations phải bằng tiếng Việt
+- summary phải bằng tiếng Việt
+- Văn phong tự nhiên, dễ hiểu
+- Không dùng tiếng Anh
 
-DATA:
+Today:
+{learning_data["today"]}
+
+=== LEARNER DATA ===
 {json.dumps(learning_data, ensure_ascii=False, indent=2)}
+
+=== INSTRUCTIONS ===
+
+Phân tích:
+- tính đều đặn trong học tập
+- tiến trình SRS
+- hiệu suất quiz
+- tỷ lệ hoàn thành task
+- nguy cơ mất động lực
+- xu hướng học tập
+
+Chỉ trả về JSON hợp lệ.
 
 JSON FORMAT:
 {{
