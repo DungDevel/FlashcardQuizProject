@@ -216,6 +216,13 @@ def init_tables():
         UNIQUE(user_id, endpoint)
     );
 
+    CREATE TABLE ai_predictions (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER UNIQUE,
+    prediction JSONB,
+    generated_at TIMESTAMP DEFAULT NOW()
+    );
+
     -- =====================
     -- INDEXES (tăng tốc truy vấn)
     -- =====================
