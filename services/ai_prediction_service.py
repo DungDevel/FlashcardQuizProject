@@ -223,7 +223,7 @@ JSON FORMAT:
                 generated_at = NOW()
         """, (
             user_id,
-            json.dumps(prediction)
+            prediction
         ))
 
         conn.commit()
