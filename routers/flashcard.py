@@ -291,7 +291,34 @@ async def generate_flashcards(
         )
 
     # 5. Build prompt
+    # 5. Build prompt
     existing = ", ".join(get_existing_fronts(deck_id)[:100])
+
+    # Phát hiện ngôn ngữ file — nếu chủ yếu tiếng Việt thì dịch sang English
+    vietnamese_chars = len(re.findall(r'[àáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ]', text[:8000], re.IGNORECASE))
+    is_vietnamese = vietnamese_chars > 30
+
+    if is_vietnamese:
+        language_instruction = """
+        The document is in Vietnamese. Your task:
+        - Extract KEY CONCEPTS and TERMS from the Vietnamese document
+        - Translate each concept into a proper ENGLISH word/phrase
+        - The "front" must be in ENGLISH
+        - The "back" must be the Vietnamese meaning/explanation
+        - Only extract terms that have clear English equivalents
+        - Skip proper nouns, place names, and personal names
+        """
+    else:
+        language_instruction = """
+        The document is in English. Your task:
+        - Extract English vocabulary words from the document
+        - The "front" must be the English word
+        - The "back" must be the Vietnamese translation
+        - Skip very common/basic English words (the, is, and, a, of, to, in, for...)
+        - Skip proper nouns (Google, Microsoft, Chrome...)
+        - Skip programming tool names (ReactJS, FastAPI, PostgreSQL...)
+        """
+
     prompt = f"""
         You are an expert English vocabulary flashcard generator.
         Your output must be ONLY a valid JSON array. No steps, no explanations, no markdown.
@@ -302,25 +329,19 @@ async def generate_flashcards(
         {existing}
 
         TASK:
-        Extract English vocabulary from the document that is strongly related to the deck topic.
-
-        RULES:
-        - ONLY use words that appear in the document
-        - DO NOT invent new words
-        - Prefer academic, technical, formal, or topic-related vocabulary
-        - Skip very common/basic English words (the, is, and, a, of, to, in, for...)
-        - Skip proper nouns (Google, Microsoft, Chrome...)
-        - Skip programming tool names (ReactJS, FastAPI, PostgreSQL...)
+        {language_instruction}
 
         STRICT DUPLICATE RULES — before outputting, ensure:
         1. No two cards have the same "front" value (even different forms: analyze/analysis)
         2. No two cards have the same "back" value (even synonyms with same Vietnamese meaning)
         3. No word from Existing words list appears in "front"
+        4. "front" must ALWAYS be in English — NEVER Vietnamese
+        5. "back" must ALWAYS be in Vietnamese — NEVER English
 
         FLASHCARD FORMAT — each object must have exactly these 4 keys:
-        - "front": English word (base form)
-        - "back": Vietnamese meaning (must be unique across all cards)
-        - "ipa": IPA pronunciation
+        - "front": English word or phrase (MUST be English)
+        - "back": Vietnamese meaning (MUST be Vietnamese, unique across all cards)
+        - "ipa": IPA pronunciation of the English word
         - "example": one natural English sentence using the word
 
         CRITICAL — OUTPUT FORMAT:
@@ -333,16 +354,16 @@ async def generate_flashcards(
         EXAMPLE OUTPUT:
         [
         {{
-            "front": "Algorithm",
-            "back": "Thuật toán",
-            "ipa": "/ˈælɡərɪðəm/",
-            "example": "The algorithm sorts data efficiently."
+            "front": "Weather forecast",
+            "back": "Dự báo thời tiết",
+            "ipa": "/ˈweðər ˈfɔːrkæst/",
+            "example": "The weather forecast predicts heavy rain tomorrow."
         }},
         {{
-            "front": "Retention",
-            "back": "Khả năng ghi nhớ",
-            "ipa": "/rɪˈtenʃən/",
-            "example": "Spaced repetition improves long-term retention."
+            "front": "Humidity",
+            "back": "Độ ẩm",
+            "ipa": "/hjuːˈmɪdɪti/",
+            "example": "High humidity makes the air feel warmer."
         }}
         ]
 
