@@ -704,6 +704,13 @@ async def get_ai_prediction(
 
             cached_prediction = cache_row[0]
 
+            # Nếu PostgreSQL trả về string JSON
+            if isinstance(cached_prediction, str):
+                try:
+                    cached_prediction = json.loads(cached_prediction)
+                except Exception:
+                    cached_prediction = None
+
             generated_at = cache_row[1]
 
             age_seconds = (
@@ -731,12 +738,26 @@ async def get_ai_prediction(
                 except Exception as e:
                     print("Refresh error:", e)
 
-            return {
-                "generated_at":
-                    generated_at.isoformat(),
+            if cached_prediction:
 
-                "prediction":
-                    cached_prediction
+                return {
+                    "generated_at": generated_at.isoformat(),
+                    "prediction": cached_prediction
+                }
+
+            # Nếu cache lỗi -> regenerate
+            learning_data = _collect_user_learning_data(user_id)
+
+            background_tasks.add_task(
+                generate_and_store_prediction,
+                user_id,
+                learning_data
+            )
+
+            return {
+                "generated_at": datetime.now().isoformat(),
+                "prediction": None,
+                "message": "Regenerating AI prediction..."
             }
 
         # =================================================
