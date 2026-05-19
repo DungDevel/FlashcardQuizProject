@@ -4,7 +4,7 @@ import re
 import httpx
 
 from datetime import datetime
-
+from psycopg2.extras import Json
 from database import get_connection
 
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
@@ -223,7 +223,7 @@ JSON FORMAT:
                 generated_at = NOW()
         """, (
             user_id,
-            prediction
+            Json(prediction)
         ))
 
         conn.commit()
