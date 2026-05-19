@@ -21,6 +21,9 @@ from docx import Document
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Depends
 from database import get_connection
 from auth_utils import get_current_user
+import base64
+from PIL import Image
+import io
 
 router = APIRouter(tags=["Flashcard"])
 
@@ -47,22 +50,95 @@ def extract_text(file_bytes: bytes, filename: str) -> str:
         doc = Document(BytesIO(file_bytes))
         return "\n".join(p.text for p in doc.paragraphs).strip()
 
-    if name.endswith(".pdf"):                                        # ← THAY đoạn này
+    if name.endswith(".pdf"):
         pdf  = fitz.open(stream=file_bytes, filetype="pdf")
         text = "\n".join(page.get_text("text") for page in pdf)
         pdf.close()
-        if len(text.strip().split()) < 20:
-            raise HTTPException(
-                status_code=400,
-                detail="File PDF này chứa ảnh, không thể đọc text. "
-                       "Vui lòng dùng PDF có text hoặc chuyển sang file .docx/.txt!"
-            )
-        return text.strip()
+
+        # PDF có text bình thường → trả về luôn
+        if len(text.strip().split()) >= 20:
+            return text.strip()
+
+        # PDF dạng ảnh → trả về None để fallback sang Vision
+        return None
 
     if name.endswith(".txt"):
         return file_bytes.decode("utf-8-sig", errors="ignore").strip()
 
     raise HTTPException(status_code=400, detail="Chỉ hỗ trợ file .docx, .pdf, .txt!")
+
+async def extract_text_from_image_pdf(file_bytes: bytes, max_pages: int = 8) -> str:
+    """
+    Gộp tất cả trang PDF thành 1 ảnh duy nhất
+    → gọi Groq Vision 1 lần → trả về text.
+    """
+    pdf    = fitz.open(stream=file_bytes, filetype="pdf")
+    total  = min(len(pdf), max_pages)
+    images = []
+
+    # ── Bước A: Render từng trang thành ảnh ──
+    for i in range(total):
+        pix = pdf[i].get_pixmap(dpi=100)          # dpi=100 → ảnh nhỏ, đủ đọc
+        img = Image.open(io.BytesIO(pix.tobytes("png")))
+        images.append(img)
+    pdf.close()
+
+    if not images:
+        raise HTTPException(status_code=400, detail="Không render được trang PDF nào!")
+
+    # ── Bước B: Ghép tất cả ảnh theo chiều dọc ──
+    total_width  = max(img.width  for img in images)
+    total_height = sum(img.height for img in images)
+    combined     = Image.new("RGB", (total_width, total_height), "white")
+
+    y_offset = 0
+    for img in images:
+        combined.paste(img, (0, y_offset))
+        y_offset += img.height
+
+    # ── Bước C: Convert ảnh gộp sang base64 ──
+    buf = io.BytesIO()
+    combined.save(buf, format="PNG", optimize=True)
+    img_b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+
+    # ── Bước D: Gọi Groq Vision 1 lần duy nhất ──
+    headers = {
+        "Authorization": f"Bearer {GROQ_API_KEY}",
+        "Content-Type":  "application/json",
+    }
+    payload = {
+        "model": "meta-llama/llama-4-scout-17b-16e-instruct",
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/png;base64,{img_b64}",
+                        },
+                    },
+                    {
+                        "type": "text",
+                        "text": (
+                            "Extract ALL text from this image exactly as it appears. "
+                            "Return only the raw text, no explanations, no markdown."
+                        ),
+                    },
+                ],
+            }
+        ],
+        "max_tokens": 2048,
+        "temperature": 0.1,
+    }
+
+    async with httpx.AsyncClient(timeout=90) as client:
+        resp = await client.post(GROQ_API_URL, headers=headers, json=payload)
+
+    if resp.status_code != 200:
+        raise HTTPException(status_code=502, detail=f"Groq Vision lỗi: {resp.text}")
+
+    return resp.json()["choices"][0]["message"]["content"].strip()
 
 def compute_hash(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
@@ -193,17 +269,32 @@ async def generate_flashcards(
 
     # 4. Trích xuất text
     text = extract_text(file_bytes, file.filename)
-    if not text:
-        raise HTTPException(status_code=400, detail="Không đọc được nội dung trong file!")
+
+    # PDF dạng ảnh → dùng Groq Vision
+    if text is None:
+        text = await extract_text_from_image_pdf(file_bytes, max_pages=8)
+
+    if not text or len(text.strip()) == 0:
+        raise HTTPException(
+            status_code=400,
+            detail="Không đọc được nội dung trong file!"
+        )
     if len(text.split()) < 10:
-        raise HTTPException(status_code=400, detail="File quá ngắn (cần ít nhất 10 từ)!")
+        raise HTTPException(
+            status_code=400,
+            detail="File quá ngắn (cần ít nhất 10 từ)!"
+        )
     if has_banned_words(text):
-        raise HTTPException(status_code=400, detail="File chứa nội dung không phù hợp!")
+        raise HTTPException(
+            status_code=400,
+            detail="File chứa nội dung không phù hợp!"
+        )
 
     # 5. Build prompt
     existing = ", ".join(get_existing_fronts(deck_id)[:100])
     prompt = f"""
         You are an expert English vocabulary flashcard generator.
+        Your output must be ONLY a valid JSON array. No steps, no explanations, no markdown.
 
         Deck topic: {deck_name}
 
@@ -213,56 +304,45 @@ async def generate_flashcards(
         TASK:
         Extract English vocabulary from the document that is strongly related to the deck topic.
 
-        IMPORTANT RULES:
+        RULES:
         - ONLY use words that appear in the document
         - DO NOT invent new words
         - Prefer academic, technical, formal, or topic-related vocabulary
-        - Skip very common/basic English words
-        - NO DUPLICATES under any circumstances
+        - Skip very common/basic English words (the, is, and, a, of, to, in, for...)
+        - Skip proper nouns (Google, Microsoft, Chrome...)
+        - Skip programming tool names (ReactJS, FastAPI, PostgreSQL...)
 
-        Treat these as duplicates:
-        - singular/plural forms
-        example: system/systems
-        - verb tense variations
-        example: analyze/analyzed/analyzing
-        - capitalization differences
-        example: Data/data
+        STRICT DUPLICATE RULES — before outputting, ensure:
+        1. No two cards have the same "front" value (even different forms: analyze/analysis)
+        2. No two cards have the same "back" value (even synonyms with same Vietnamese meaning)
+        3. No word from Existing words list appears in "front"
 
-        If a word already exists in Existing words:
-        - DO NOT include it
-
-        Each word must appear ONLY ONCE.
-
-        Before generating the final answer:
-        1. Normalize all words
-        2. Remove duplicate meanings/forms
-        3. Double-check uniqueness carefully
-
-        FLASHCARD FORMAT:
-        Each flashcard object must contain:
-        - "front": English vocabulary word
-        - "back": Vietnamese meaning
+        FLASHCARD FORMAT — each object must have exactly these 4 keys:
+        - "front": English word (base form)
+        - "back": Vietnamese meaning (must be unique across all cards)
         - "ipa": IPA pronunciation
-        - "example": Natural English example sentence
+        - "example": one natural English sentence using the word
 
-        STRICT OUTPUT RULES:
-        - Return ONLY valid JSON
-        - Return ONLY a JSON array
-        - Do NOT include markdown
-        - Do NOT include explanations
-        - Do NOT include comments
-        - Use ONLY double quotes
-        - Use ":" between keys and values
-        - Never use "="
-        - Output must be parseable with json.loads()
+        CRITICAL — OUTPUT FORMAT:
+        - Start your response with [ and end with ]
+        - Do NOT write any steps, reasoning, or explanation
+        - Do NOT write "Step 1", "Step 2" or any similar text
+        - Do NOT use markdown code blocks
+        - Return ONLY the raw JSON array
 
-        VALID EXAMPLE:
+        EXAMPLE OUTPUT:
         [
         {{
-            "front": "Agile",
-            "back": "Phương pháp linh hoạt",
-            "ipa": "/ˈædʒaɪl/",
-            "example": "Agile development improves team flexibility."
+            "front": "Algorithm",
+            "back": "Thuật toán",
+            "ipa": "/ˈælɡərɪðəm/",
+            "example": "The algorithm sorts data efficiently."
+        }},
+        {{
+            "front": "Retention",
+            "back": "Khả năng ghi nhớ",
+            "ipa": "/rɪˈtenʃən/",
+            "example": "Spaced repetition improves long-term retention."
         }}
         ]
 
@@ -312,6 +392,32 @@ async def generate_flashcards(
 
     if not flashcards:
         print("AI RAW RESPONSE:\n", ai_text)
+        raise HTTPException(status_code=400, detail="AI không tạo được flashcard nào!")
+    
+    # Sau khi parse JSON từ AI, thêm đoạn này trước khi lưu DB
+
+    # Loại bỏ duplicate front (từ vựng)
+    seen_fronts   = set()
+    seen_backs    = set()
+    unique_cards  = []
+
+    for card in flashcards:
+        front = card.get("front", "").strip().lower()
+        back  = card.get("back",  "").strip()
+
+        # Bỏ qua nếu từ hoặc nghĩa đã xuất hiện
+        if front in seen_fronts:
+            continue
+        if back in seen_backs:
+            continue
+
+        seen_fronts.add(front)
+        seen_backs.add(back)
+        unique_cards.append(card)
+
+    flashcards = unique_cards
+
+    if not flashcards:
         raise HTTPException(status_code=400, detail="AI không tạo được flashcard nào!")
 
     # 8. Lưu vào DB
