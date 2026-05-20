@@ -454,10 +454,6 @@ def _rebuild_planner(user_id: int) -> dict:
             if day_code not in study_days:
                 continue
 
-            # Bỏ qua ngày đã qua trong tuần (chỉ tạo từ hôm nay trở đi)
-            if day_date < today:
-                continue
-
             cur.execute(
                 "INSERT INTO planner_day (planner_id, study_date, day_of_week) VALUES (%s, %s, %s) RETURNING id",
                 (planner_id, day_date, day_code),
