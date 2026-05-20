@@ -8,7 +8,8 @@ import json
 from fastapi import (
     APIRouter,
     Depends,
-    BackgroundTasks
+    BackgroundTasks,
+    HTTPException
 )
 
 from datetime import (
@@ -301,7 +302,7 @@ def _collect_user_learning_data(user_id: int):
             ON pd.planner_id = p.id
 
             WHERE p.user_id = %s
-            AND pd.study_date >= NOW() - INTERVAL '28 days'
+            AND pd.study_date >= CURRENT_DATE - INTERVAL '28 days'
 
             GROUP BY pd.study_date
 
@@ -472,67 +473,206 @@ def get_dashboard_overview(
 
     user_id = current_user["id"]
 
-    data = _collect_user_learning_data(user_id)
+    conn = get_connection()
 
-    total_quiz = sum(
-        q["total"]
-        for q in data["quiz"]["by_type"]
-    )
+    try:
 
-    total_correct = sum(
-        q["correct"]
-        for q in data["quiz"]["by_type"]
-    )
+        cur = conn.cursor()
 
-    latest_task = (
-        data["planner"]["task_daily_28d"][-1]
-        if data["planner"]["task_daily_28d"]
-        else {
-            "done": 0,
-            "total": 0,
-            "rate": 0
+        # =================================================
+        # PROFILE
+        # =================================================
+
+        cur.execute("""
+            SELECT
+                study_level,
+                study_days
+            FROM user_profile
+            WHERE user_id = %s
+        """, (user_id,))
+
+        profile = cur.fetchone()
+
+        study_level = (
+            profile[0]
+            if profile else "Easy"
+        )
+
+        study_days = (
+            profile[1]
+            if profile else ""
+        )
+
+        # =================================================
+        # FLASHCARDS MASTERED
+        # =================================================
+
+        cur.execute("""
+            SELECT COUNT(*)
+            FROM user_flashcard_progress
+            WHERE user_id = %s
+            AND status = 'done'
+        """, (user_id,))
+
+        flashcards_mastered = int(
+            cur.fetchone()[0] or 0
+        )
+
+        # =================================================
+        # FLASHCARDS DUE TODAY
+        # =================================================
+
+        cur.execute("""
+            SELECT COUNT(*)
+            FROM user_flashcard_progress
+            WHERE user_id = %s
+            AND next_review_date <= NOW()
+        """, (user_id,))
+
+        flashcards_due_today = int(
+            cur.fetchone()[0] or 0
+        )
+
+        # =================================================
+        # QUIZ STATS
+        # =================================================
+
+        cur.execute("""
+            SELECT
+                COUNT(*) AS total,
+
+                SUM(
+                    CASE
+                        WHEN is_correct
+                        THEN 1
+                        ELSE 0
+                    END
+                ) AS correct
+
+            FROM user_quiz_progress
+
+            WHERE user_id = %s
+        """, (user_id,))
+
+        quiz_row = cur.fetchone()
+
+        quizzes_completed = int(
+            quiz_row[0] or 0
+        )
+
+        total_correct = int(
+            quiz_row[1] or 0
+        )
+
+        quiz_accuracy = round(
+            (total_correct / quizzes_completed) * 100,
+            1
+        ) if quizzes_completed else 0
+
+        # =================================================
+        # ACTIVE DECKS
+        # =================================================
+
+        cur.execute("""
+            SELECT COUNT(DISTINCT deck_id)
+            FROM user_flashcard_progress
+            WHERE user_id = %s
+        """, (user_id,))
+
+        active_decks = int(
+            cur.fetchone()[0] or 0
+        )
+
+        # =================================================
+        # TODAY TASKS
+        # =================================================
+
+        cur.execute("""
+            SELECT
+                COUNT(*) AS total,
+
+                SUM(
+                    CASE
+                        WHEN t.status = 'completed'
+                        THEN 1
+                        ELSE 0
+                    END
+                ) AS done
+
+            FROM task t
+
+            JOIN planner_day pd
+            ON t.planner_day_id = pd.id
+
+            JOIN planner p
+            ON pd.planner_id = p.id
+
+            WHERE p.user_id = %s
+            AND pd.study_date = CURRENT_DATE
+        """, (user_id,))
+
+        task_row = cur.fetchone()
+
+        tasks_total = int(
+            task_row[0] or 0
+        )
+
+        tasks_done = int(
+            task_row[1] or 0
+        )
+
+        completion = round(
+            (tasks_done / tasks_total) * 100,
+            1
+        ) if tasks_total else 0
+
+        cur.close()
+
+        return {
+
+            "user_id": user_id,
+
+            "study_level": study_level,
+
+            "study_days": study_days,
+
+            "active_decks": active_decks,
+
+            "flashcards_mastered":
+                flashcards_mastered,
+
+            "flashcards_due_today":
+                flashcards_due_today,
+
+            "quizzes_completed":
+                quizzes_completed,
+
+            "quiz_accuracy":
+                quiz_accuracy,
+
+            "today": {
+
+                "tasks_done":
+                    tasks_done,
+
+                "tasks_total":
+                    tasks_total,
+
+                "completion":
+                    completion
+            }
         }
-    )
 
-    return {
-        "user_id": user_id,
+    except Exception as e:
 
-        "study_level":
-            data["profile"]["study_level"],
+        raise HTTPException(
+            status_code=500,
+            detail=str(e)
+        )
 
-        "study_days":
-            data["profile"]["study_days"],
+    finally:
 
-        "active_decks":
-            data["active_decks"],
-
-        "flashcards_mastered":
-            data["flashcard"]["status_breakdown"]
-            .get("done", 0),
-
-        "flashcards_due_today":
-            data["flashcard"]["due_now"],
-
-        "quizzes_completed":
-            total_quiz,
-
-        "quiz_accuracy":
-            round(
-                (total_correct / total_quiz) * 100,
-                1
-            ) if total_quiz else 0,
-
-        "today": {
-            "tasks_done":
-                latest_task["done"],
-
-            "tasks_total":
-                latest_task["total"],
-
-            "completion":
-                latest_task["rate"]
-        }
-    }
+        conn.close()
 
 
 # =========================================================
