@@ -247,26 +247,6 @@ async def generate_flashcards(
     file_bytes = await file.read()
     file_hash  = compute_hash(file_bytes)
 
-    # 3. Kiểm tra trùng lặp
-    conn = get_connection()
-    try:
-        cur = conn.cursor()
-        cur.execute(
-            "SELECT id FROM user_uploaded_files WHERE user_id = %s AND file_hash = %s",
-            (user_id, file_hash),
-        )
-        if cur.fetchone():
-            raise HTTPException(status_code=400, detail="File này bạn đã upload trước đó!")
-
-        cur.execute(
-            "INSERT INTO user_uploaded_files (user_id, file_hash) VALUES (%s, %s)",
-            (user_id, file_hash),
-        )
-        conn.commit()
-        cur.close()
-    finally:
-        conn.close()
-
     # 4. Trích xuất text
     text = extract_text(file_bytes, file.filename)
 
