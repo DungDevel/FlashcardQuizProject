@@ -384,13 +384,113 @@ def edit_profile(
 
         conn.commit()
         cur.close()
-
-        return {"message": "Cập nhật hồ sơ thành công!"}
     except HTTPException:
         raise
     except Exception as e:
         conn.rollback()
         raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        conn.close()
+
+    # ── Tự động tạo lại planner nếu user thay đổi study_days hoặc study_level ──
+    planner_result = None
+    if study_days_str or study_level:
+        planner_result = _rebuild_planner(user_id)
+
+    return {
+        "message":        "Cập nhật hồ sơ thành công!",
+        "planner_rebuilt": planner_result,
+    }
+
+
+def _rebuild_planner(user_id: int) -> dict:
+    """
+    Xóa planner tuần hiện tại (nếu có) và tạo lại
+    dựa trên study_days + study_level mới nhất trong profile.
+    """
+    from routers.planner import generate_tasks_for_level, DAY_MAP
+
+    today  = datetime.now().date()
+    monday = today - timedelta(days=today.weekday())
+    sunday = monday + timedelta(days=6)
+
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+
+        # Lấy profile mới nhất sau khi đã update
+        cur.execute(
+            "SELECT study_days, study_level FROM user_profile WHERE user_id = %s",
+            (user_id,),
+        )
+        profile = cur.fetchone()
+        if not profile or not profile[0]:
+            return {"status": "skipped", "reason": "Chưa có study_days trong profile"}
+
+        study_days_str, study_level = profile
+        study_days  = [d.strip().upper() for d in study_days_str.split(",")]
+        study_level = study_level or "Easy"
+
+        # Xóa planner tuần hiện tại (CASCADE tự xóa planner_day và task)
+        cur.execute(
+            "DELETE FROM planner WHERE user_id = %s AND week_start = %s",
+            (user_id, monday),
+        )
+
+        # Tạo planner mới
+        cur.execute(
+            "INSERT INTO planner (user_id, week_start, week_end) VALUES (%s, %s, %s) RETURNING id",
+            (user_id, monday, sunday),
+        )
+        planner_id = cur.fetchone()[0]
+
+        tasks_template = generate_tasks_for_level(study_level)
+        days_added     = []
+
+        for i in range(7):
+            day_date = monday + timedelta(days=i)
+            day_code = DAY_MAP[day_date.weekday()]
+
+            if day_code not in study_days:
+                continue
+
+            # Bỏ qua ngày đã qua trong tuần (chỉ tạo từ hôm nay trở đi)
+            if day_date < today:
+                continue
+
+            cur.execute(
+                "INSERT INTO planner_day (planner_id, study_date, day_of_week) VALUES (%s, %s, %s) RETURNING id",
+                (planner_id, day_date, day_code),
+            )
+            day_id = cur.fetchone()[0]
+
+            for task_type, title, desc, total in tasks_template:
+                cur.execute(
+                    """
+                    INSERT INTO task
+                        (planner_day_id, task_type, title, description, total_required)
+                    VALUES (%s, %s, %s, %s, %s)
+                    """,
+                    (day_id, task_type, title, desc, total),
+                )
+
+            days_added.append({"date": str(day_date), "day": day_code})
+
+        conn.commit()
+        cur.close()
+
+        return {
+            "status":      "rebuilt",
+            "planner_id":  planner_id,
+            "week":        f"{monday} → {sunday}",
+            "days_added":  days_added,
+            "study_level": study_level,
+        }
+
+    except Exception as e:
+        conn.rollback()
+        print(f"⚠️ Lỗi rebuild planner: {e}")
+        return {"status": "error", "reason": str(e)}
     finally:
         conn.close()
 
