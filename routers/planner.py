@@ -20,12 +20,20 @@ DAY_MAP = {0: "MON", 1: "TUE", 2: "WED", 3: "THU", 4: "FRI", 5: "SAT", 6: "SUN"}
 
 def generate_tasks_for_level(study_level: str) -> list[tuple]:
     """Trả về list (task_type, title, description, total_required)."""
-    counts = {"easy": 5, "medium": 10, "hard": 15}.get(study_level.lower(), 5)
+    config = {
+        "easy":   {"card": 10, "quiz": 5},
+        "medium": {"card": 20, "quiz": 10},
+        "hard":   {"card": 30, "quiz": 15},
+    }.get(study_level.lower(), {"card": 10, "quiz": 5})
+
+    card_count = config["card"]
+    quiz_count = config["quiz"]
+
     return [
-        ("flashcard", "Flashcards",           f"Ôn {counts} thẻ flashcard", counts),
-        ("quiz",      "Multiple Choice Quiz",  f"Làm {counts} câu trắc nghiệm", counts),
-        ("quiz",      "True/False Quiz",       f"Làm {counts} câu đúng/sai", counts),
-        ("quiz",      "Fill-in-blank Quiz",    f"Làm {counts} câu điền chỗ trống", counts),
+        ("flashcard", "Flashcards",          f"Ôn {card_count} thẻ flashcard",       card_count),
+        ("quiz",      "Multiple Choice Quiz", f"Làm {quiz_count} câu trắc nghiệm",   quiz_count),
+        ("quiz",      "True/False Quiz",      f"Làm {quiz_count} câu đúng/sai",       quiz_count),
+        ("quiz",      "Fill-in-blank Quiz",   f"Làm {quiz_count} câu điền chỗ trống", quiz_count),
     ]
 
 
