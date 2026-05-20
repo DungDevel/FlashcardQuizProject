@@ -30,7 +30,7 @@ router = APIRouter(tags=["Flashcard"])
 # ===== Config =====
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
-GROQ_MODEL   = "llama-3.1-8b-instant"   # Model Groq ổn định
+GROQ_MODEL   = "llama-3.3-70b-versatile"   # Model Groq ổn định
 
 BANNED_WORDS = [
     "sex", "porn", "rape", "terrorist", "fuck", "shit", "bitch",
@@ -313,10 +313,9 @@ async def generate_flashcards(
 
         STRICT DUPLICATE RULES — before outputting, ensure:
         1. No two cards have the same "front" value (even different forms: analyze/analysis)
-        2. No two cards have the same "back" value (even synonyms with same Vietnamese meaning)
-        3. No word from Existing words list appears in "front"
-        4. "front" must ALWAYS be in English — NEVER Vietnamese
-        5. "back" must ALWAYS be in Vietnamese — NEVER English
+        2. No word from Existing words list appears in "front"
+        3. "front" must ALWAYS be in English — NEVER Vietnamese
+        4. "back" must ALWAYS be in Vietnamese — NEVER English
 
         FLASHCARD FORMAT — each object must have exactly these 4 keys:
         - "front": English word or phrase (MUST be English)
@@ -408,8 +407,6 @@ async def generate_flashcards(
 
         # Bỏ qua nếu từ hoặc nghĩa đã xuất hiện
         if front in seen_fronts:
-            continue
-        if back in seen_backs:
             continue
 
         seen_fronts.add(front)
